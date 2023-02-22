@@ -1,13 +1,16 @@
+use crate::{business_logic::state::state_api_objects::BlockInfo, utils::Address};
 use felt::Felt;
-use num_traits::{Num, Zero};
+use getset::{CopyGetters, MutGetters};
+use num_traits::Zero;
 
-use crate::utils::Address;
-
-#[allow(unused)]
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum StarknetChainId {
+pub enum StarknetChainId {
+    // TODO: Remove warning inhibitor when finally used.
+    #[allow(dead_code)]
     MainNet,
     TestNet,
+    // TODO: Remove warning inhibitor when finally used.
+    #[allow(dead_code)]
     TestNet2,
 }
 
@@ -23,63 +26,72 @@ impl ToString for StarknetChainId {
 }
 
 impl StarknetChainId {
-    pub(crate) fn to_felt(self) -> Felt {
+    pub fn to_felt(self) -> Felt {
         Felt::from_bytes_be(self.to_string().as_bytes())
     }
 }
 
-#[allow(unused)]
-#[derive(Debug, Clone)]
-pub(crate) struct StarknetOsConfig {
+#[derive(Debug, Clone, MutGetters)]
+pub struct StarknetOsConfig {
+    #[get_mut = "pub"]
     pub(crate) chain_id: StarknetChainId,
-    pub(crate) fee_token_address: Address,
+    pub(crate) _fee_token_address: Address,
 }
 
-#[allow(unused)]
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug, CopyGetters, MutGetters)]
 pub struct StarknetGeneralConfig {
+    #[get_mut = "pub"]
     pub(crate) starknet_os_config: StarknetOsConfig,
-    contract_storage_commitment_tree_height: u64,
-    global_state_commitment_tree_height: u64,
-    sequencer_address: Address,
+    _contract_storage_commitment_tree_height: u64,
+    _global_state_commitment_tree_height: u64,
+    #[get_copy = "pub"]
     pub(crate) invoke_tx_max_n_steps: u64,
+    pub(crate) validate_max_n_steps: u64,
+    #[get_mut = "pub"]
+    pub(crate) block_info: BlockInfo,
 }
 
 impl StarknetGeneralConfig {
+    // TODO: Remove warning inhibitor when finally used.
+    #[allow(dead_code)]
     pub(crate) fn new(
         starknet_os_config: StarknetOsConfig,
         contract_storage_commitment_tree_height: u64,
         global_state_commitment_tree_height: u64,
-        sequencer_address: Address,
         invoke_tx_max_n_steps: u64,
+        block_info: BlockInfo,
     ) -> Self {
         Self {
             starknet_os_config,
-            contract_storage_commitment_tree_height,
-            global_state_commitment_tree_height,
-            sequencer_address,
+            _contract_storage_commitment_tree_height: contract_storage_commitment_tree_height,
+            _global_state_commitment_tree_height: global_state_commitment_tree_height,
             invoke_tx_max_n_steps,
+            validate_max_n_steps: 0,
+            block_info,
         }
     }
-    pub(crate) fn default() -> Self {
+}
+
+impl Default for StarknetGeneralConfig {
+    fn default() -> Self {
         Self {
             starknet_os_config: StarknetOsConfig {
                 chain_id: StarknetChainId::TestNet,
-                fee_token_address: Address(Felt::zero()),
+                _fee_token_address: Address(Felt::zero()),
             },
-            contract_storage_commitment_tree_height: 0,
-            global_state_commitment_tree_height: 0,
-            sequencer_address: Address(0.into()),
+            _contract_storage_commitment_tree_height: 0,
+            _global_state_commitment_tree_height: 0,
             invoke_tx_max_n_steps: 0,
+            validate_max_n_steps: 0,
+            block_info: BlockInfo::empty(Address::default()),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use felt::felt_str;
-
     use super::*;
+    use felt::felt_str;
 
     #[test]
     fn starknet_chain_to_felt() {

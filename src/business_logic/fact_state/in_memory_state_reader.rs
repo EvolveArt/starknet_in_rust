@@ -1,29 +1,25 @@
-use std::{clone, collections::HashMap};
-
-use felt::Felt;
-
+use super::contract_state::ContractState;
 use crate::{
     business_logic::state::{state_api::StateReader, state_cache::StorageEntry},
     core::errors::state_errors::StateError,
     services::api::contract_class::ContractClass,
-    starknet_storage::{
-        dict_storage::{DictStorage, Prefix},
-        storage::Storage,
-    },
+    starknet_storage::{dict_storage::DictStorage, storage::Storage},
     utils::Address,
 };
+use felt::Felt;
+use getset::MutGetters;
+use std::collections::HashMap;
 
-use super::contract_state::{self, ContractState};
-
-#[derive(Clone, Debug)]
-pub(crate) struct InMemoryStateReader {
+#[derive(Clone, Debug, Default, MutGetters)]
+pub struct InMemoryStateReader {
     pub(crate) ffc: DictStorage,
+    #[getset(get_mut = "pub")]
     pub(crate) contract_states: HashMap<Address, ContractState>,
     pub(crate) contract_class_storage: DictStorage,
 }
 
 impl InMemoryStateReader {
-    pub(crate) fn new(ffc: DictStorage, contract_class_storage: DictStorage) -> Self {
+    pub fn new(ffc: DictStorage, contract_class_storage: DictStorage) -> Self {
         Self {
             ffc,
             contract_states: HashMap::new(),
@@ -73,26 +69,24 @@ impl StateReader for InMemoryStateReader {
 }
 #[cfg(test)]
 mod tests {
-    use cairo_rs::types::program::Program;
-
+    use super::*;
     use crate::{
-        business_logic::state::cached_state,
-        services::api::contract_class::{self, ContractEntryPoint, EntryPointType},
+        services::api::contract_class::{ContractEntryPoint, EntryPointType},
         starknet_storage::dict_storage::DictStorage,
     };
-
-    use super::*;
+    use cairo_rs::types::program::Program;
 
     #[test]
     fn get_contract_state_test() {
         let mut state_reader = InMemoryStateReader::new(DictStorage::new(), DictStorage::new());
 
         let contract_address = Address(32123.into());
-        let contract_state = ContractState::create([1; 32], Felt::new(109), HashMap::new());
+        let contract_state = ContractState::new([1; 32], Felt::new(109), HashMap::new());
 
         state_reader
             .ffc
-            .set_contract_state(&contract_address.to_32_bytes().unwrap(), &contract_state);
+            .set_contract_state(&contract_address.to_32_bytes().unwrap(), &contract_state)
+            .unwrap();
 
         assert_eq!(
             state_reader.get_contract_state(&contract_address),
@@ -129,7 +123,8 @@ mod tests {
 
         state_reader
             .contract_class_storage
-            .set_contract_class(&[0; 32], &contract_class);
+            .set_contract_class(&[0; 32], &contract_class)
+            .unwrap();
 
         assert_eq!(
             state_reader.get_contract_class(&contract_class_key),

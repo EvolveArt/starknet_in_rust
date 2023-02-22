@@ -1,40 +1,38 @@
-use super::business_logic_syscall_handler::BusinessLogicSyscallHandler;
-use super::hint_code::*;
-use super::os_syscall_handler::OsSyscallHandler;
-use super::syscall_request::*;
-use super::syscall_response::GetBlockNumberResponse;
-use super::syscall_response::GetContractAddressResponse;
-use super::syscall_response::StorageReadResponse;
-use super::syscall_response::{
-    CallContractResponse, GetBlockTimestampResponse, GetCallerAddressResponse,
-    GetSequencerAddressResponse, GetTxInfoResponse, GetTxSignatureResponse, WriteSyscallResponse,
+use super::{
+    hint_code::*,
+    os_syscall_handler::OsSyscallHandler,
+    syscall_request::*,
+    syscall_response::{
+        CallContractResponse, GetBlockNumberResponse, GetBlockTimestampResponse,
+        GetCallerAddressResponse, GetContractAddressResponse, GetSequencerAddressResponse,
+        GetTxInfoResponse, GetTxSignatureResponse, StorageReadResponse, WriteSyscallResponse,
+    },
 };
-use crate::business_logic::execution::objects::TxInfoStruct;
-use crate::business_logic::fact_state::in_memory_state_reader::InMemoryStateReader;
-use crate::business_logic::state::cached_state::CachedState;
-use crate::business_logic::state::state_api::State;
-use crate::business_logic::state::state_api::StateReader;
-use crate::business_logic::state::state_api_objects::BlockInfo;
-use crate::core::errors::syscall_handler_errors::SyscallHandlerError;
-use crate::starknet_storage::dict_storage::DictStorage;
-use crate::starknet_storage::errors::storage_errors::StorageError;
-use crate::utils::get_big_int;
-use crate::utils::Address;
-use cairo_rs::any_box;
-use cairo_rs::hint_processor::builtin_hint_processor::builtin_hint_processor_definition::{
-    BuiltinHintProcessor, HintProcessorData,
+use crate::{
+    business_logic::{
+        execution::{execution_errors::ExecutionError, objects::TxInfoStruct},
+        state::state_api_objects::BlockInfo,
+    },
+    core::errors::syscall_handler_errors::SyscallHandlerError,
+    utils::Address,
 };
-use cairo_rs::hint_processor::builtin_hint_processor::hint_utils::get_relocatable_from_var_name;
-use cairo_rs::hint_processor::hint_processor_definition::{HintProcessor, HintReference};
-use cairo_rs::serde::deserialize_program::ApTracking;
-use cairo_rs::types::exec_scope::ExecutionScopes;
-use cairo_rs::types::relocatable::{MaybeRelocatable, Relocatable};
-use cairo_rs::vm::errors::hint_errors::HintError;
-use cairo_rs::vm::errors::vm_errors::VirtualMachineError;
-use cairo_rs::vm::vm_core::VirtualMachine;
+use cairo_rs::{
+    hint_processor::{
+        builtin_hint_processor::{
+            builtin_hint_processor_definition::{BuiltinHintProcessor, HintProcessorData},
+            hint_utils::get_relocatable_from_var_name,
+        },
+        hint_processor_definition::{HintProcessor, HintReference},
+    },
+    serde::deserialize_program::ApTracking,
+    types::{
+        exec_scope::ExecutionScopes,
+        relocatable::{MaybeRelocatable, Relocatable},
+    },
+    vm::{errors::hint_errors::HintError, vm_core::VirtualMachine},
+};
 use felt::Felt;
-use std::any::Any;
-use std::collections::HashMap;
+use std::{any::Any, collections::HashMap};
 
 //* ---------------------
 //* SyscallHandler Trait
@@ -91,7 +89,7 @@ pub(crate) trait SyscallHandler {
             return Err(SyscallHandlerError::ExpectedGetBlockTimestampRequest);
         };
 
-        self._storage_write(request.address, request.value);
+        self._storage_write(request.address, request.value)?;
 
         Ok(())
     }
@@ -142,7 +140,7 @@ pub(crate) trait SyscallHandler {
         syscall_name: &str,
         vm: &VirtualMachine,
         syscall_ptr: Relocatable,
-    ) -> Result<Vec<u64>, SyscallHandlerError>;
+    ) -> Result<Vec<Felt>, SyscallHandlerError>;
 
     fn _get_caller_address(
         &mut self,
@@ -215,11 +213,10 @@ pub(crate) trait SyscallHandler {
         vm: &mut VirtualMachine,
         syscall_ptr: Relocatable,
     ) -> Result<(), SyscallHandlerError> {
-        let request =
-            match self._read_and_validate_syscall_request("get_tx_signature", vm, syscall_ptr)? {
-                SyscallRequest::GetTxSignature(request) => request,
-                _ => return Err(SyscallHandlerError::ExpectedGetTxSignatureRequest),
-            };
+        match self._read_and_validate_syscall_request("get_tx_signature", vm, syscall_ptr)? {
+            SyscallRequest::GetTxSignature(_) => {}
+            _ => return Err(SyscallHandlerError::ExpectedGetTxSignatureRequest),
+        }
 
         let tx_info_pr = self._get_tx_info_ptr(vm)?;
         let tx_info = TxInfoStruct::from_ptr(vm, tx_info_pr)?;
@@ -315,35 +312,56 @@ pub(crate) trait SyscallHandler {
     }
 }
 
+pub(crate) trait SyscallHandlerPostRun {
+    /// Performs post run syscall related tasks (if any).
+    fn post_run(
+        &self,
+        _runner: &mut VirtualMachine,
+        _syscall_stop_ptr: Relocatable,
+    ) -> Result<(), ExecutionError> {
+        Ok(())
+    }
+}
+
 //* ------------------------
 //* Structs implementations
 //* ------------------------
 
 pub(crate) struct SyscallHintProcessor<H: SyscallHandler> {
     pub(crate) builtin_hint_processor: BuiltinHintProcessor,
-    #[allow(unused)] // TODO: remove after using.
     pub(crate) syscall_handler: H,
 }
 
-impl SyscallHintProcessor<OsSyscallHandler> {
+impl<H> SyscallHintProcessor<H>
+where
+    H: SyscallHandler,
+{
+    pub fn new(syscall_handler: H) -> Self {
+        SyscallHintProcessor {
+            builtin_hint_processor: BuiltinHintProcessor::new_empty(),
+            syscall_handler,
+        }
+    }
+
+    pub fn new_empty() -> Self
+    where
+        H: Default,
+    {
+        SyscallHintProcessor {
+            builtin_hint_processor: BuiltinHintProcessor::new_empty(),
+            syscall_handler: Default::default(),
+        }
+    }
+
+    // TODO: Remove warning inhibitor when finally used.
+    #[allow(dead_code)]
     pub fn new_empty_os() -> Result<SyscallHintProcessor<OsSyscallHandler>, SyscallHandlerError> {
         Ok(SyscallHintProcessor {
             builtin_hint_processor: BuiltinHintProcessor::new_empty(),
             syscall_handler: OsSyscallHandler::default(),
         })
     }
-}
 
-impl SyscallHintProcessor<BusinessLogicSyscallHandler<CachedState<InMemoryStateReader>>> {
-    pub fn new_empty() -> Result<Self, SyscallHandlerError> {
-        Ok(SyscallHintProcessor {
-            builtin_hint_processor: BuiltinHintProcessor::new_empty(),
-            syscall_handler: BusinessLogicSyscallHandler::default(),
-        })
-    }
-}
-
-impl<H: SyscallHandler> SyscallHintProcessor<H> {
     pub fn should_run_syscall_hint(
         &mut self,
         vm: &mut VirtualMachine,
@@ -443,6 +461,8 @@ impl<H: SyscallHandler> HintProcessor for SyscallHintProcessor<H> {
     }
 }
 
+// TODO: Remove warning inhibitor when finally used.
+#[allow(dead_code)]
 fn get_ids_data(
     reference_ids: &HashMap<String, usize>,
     references: &HashMap<usize, HintReference>,
@@ -476,21 +496,30 @@ fn get_syscall_ptr(
 
 #[cfg(test)]
 mod tests {
-
-    use crate::business_logic::execution::objects::{
-        OrderedEvent, OrderedL2ToL1Message, TransactionExecutionContext,
-    };
-    use crate::utils::test_utils::ids_data;
-    use crate::utils::{get_big_int, get_integer, get_relocatable};
-    use crate::{
-        add_segments, core::syscalls::os_syscall_handler::OsSyscallHandler, utils::test_utils::vm,
-    };
-    use crate::{allocate_selector, memory_insert};
-    use cairo_rs::relocatable;
-    use num_traits::{Num, ToPrimitive};
-
     use super::*;
+    use crate::{
+        add_segments, allocate_selector, any_box,
+        business_logic::{
+            execution::objects::{OrderedEvent, OrderedL2ToL1Message, TransactionExecutionContext},
+            fact_state::in_memory_state_reader::InMemoryStateReader,
+            state::{cached_state::CachedState, state_api::State},
+        },
+        core::syscalls::os_syscall_handler::OsSyscallHandler,
+        memory_insert,
+        utils::{
+            get_big_int, get_integer, get_relocatable,
+            test_utils::{ids_data, vm},
+        },
+    };
+    use cairo_rs::relocatable;
+    use num_traits::Num;
     use std::collections::VecDeque;
+
+    type BusinessLogicSyscallHandler =
+        crate::core::syscalls::business_logic_syscall_handler::BusinessLogicSyscallHandler<
+            CachedState<InMemoryStateReader>,
+        >;
+    type SyscallHintProcessor = super::SyscallHintProcessor<BusinessLogicSyscallHandler>;
 
     #[test]
     fn read_send_message_to_l1_request() {
@@ -546,7 +575,7 @@ mod tests {
 
     #[test]
     fn get_block_timestamp_for_business_logic() {
-        let mut syscall = BusinessLogicSyscallHandler::default();
+        let syscall = BusinessLogicSyscallHandler::default();
         let mut vm = vm!();
         add_segments!(vm, 2);
 
@@ -560,9 +589,9 @@ mod tests {
 
         let ids_data = ids_data!["syscall_ptr"];
 
-        let hint_data = HintProcessorData::new_default(GET_SEQUENCER_ADDRESS.to_string(), ids_data);
+        let hint_data = HintProcessorData::new_default(GET_BLOCK_TIMESTAMP.to_string(), ids_data);
         // invoke syscall
-        let mut syscall_handler = SyscallHintProcessor::new_empty().unwrap();
+        let mut syscall_handler = SyscallHintProcessor::new_empty();
         syscall_handler
             .execute_hint(
                 &mut vm,
@@ -581,7 +610,6 @@ mod tests {
 
     #[test]
     fn get_sequencer_address_for_business_logic() {
-        let mut syscall = BusinessLogicSyscallHandler::default();
         let mut vm = vm!();
         add_segments!(vm, 2);
 
@@ -591,7 +619,7 @@ mod tests {
 
         let hint_data = HintProcessorData::new_default(GET_SEQUENCER_ADDRESS.to_string(), ids_data);
         // invoke syscall
-        let mut syscall_handler = SyscallHintProcessor::new_empty().unwrap();
+        let mut syscall_handler = SyscallHintProcessor::new_empty();
         syscall_handler
             .execute_hint(
                 &mut vm,
@@ -639,7 +667,7 @@ mod tests {
 
         let hint_data = HintProcessorData::new_default(EMIT_EVENT_CODE.to_string(), ids_data);
         // invoke syscall
-        let mut syscall_handler = SyscallHintProcessor::new_empty().unwrap();
+        let mut syscall_handler = SyscallHintProcessor::new_empty();
         syscall_handler
             .execute_hint(
                 &mut vm,
@@ -692,7 +720,7 @@ mod tests {
 
         let hint_data = HintProcessorData::new_default(GET_TX_INFO.to_string(), ids_data);
         // invoke syscall
-        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty().unwrap();
+        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty();
 
         let tx_execution_context = TransactionExecutionContext {
             n_emitted_events: 50,
@@ -703,7 +731,7 @@ mod tests {
             signature: vec![300.into(), 301.into()],
             nonce: 263.into(),
             n_sent_messages: 52,
-            n_steps: 100000,
+            _n_steps: 100000,
         };
         syscall_handler_hint_processor
             .syscall_handler
@@ -733,7 +761,7 @@ mod tests {
         // TxInfoStruct
         assert_eq!(
             get_integer(&vm, &relocatable!(4, 0)),
-            Ok(tx_execution_context.version)
+            Ok(tx_execution_context.version as usize)
         );
         assert_eq!(
             get_big_int(&vm, &relocatable!(4, 1)),
@@ -796,7 +824,7 @@ mod tests {
 
         let hint_data = HintProcessorData::new_default(GET_TX_INFO.to_string(), ids_data);
         // invoke syscall
-        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty().unwrap();
+        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty();
 
         syscall_handler_hint_processor.syscall_handler.tx_info_ptr =
             Some(relocatable!(7, 0).into());
@@ -871,7 +899,7 @@ mod tests {
 
         let hint_data = HintProcessorData::new_default(GET_CALLER_ADDRESS.to_string(), ids_data);
         // invoke syscall
-        let mut hint_processor = SyscallHintProcessor::new_empty().unwrap();
+        let mut hint_processor = SyscallHintProcessor::new_empty();
         hint_processor
             .execute_hint(
                 &mut vm,
@@ -913,7 +941,7 @@ mod tests {
 
         let hint_data = HintProcessorData::new_default(SEND_MESSAGE_TO_L1.to_string(), ids_data);
         // invoke syscall
-        let mut hint_processor = SyscallHintProcessor::new_empty().unwrap();
+        let mut hint_processor = SyscallHintProcessor::new_empty();
         hint_processor
             .execute_hint(
                 &mut vm,
@@ -946,18 +974,6 @@ mod tests {
 
     #[test]
     fn test_get_block_number() {
-        let mut syscall = OsSyscallHandler::new(
-            VecDeque::new(),
-            VecDeque::new(),
-            VecDeque::new(),
-            VecDeque::new(),
-            VecDeque::new(),
-            VecDeque::new(),
-            HashMap::new(),
-            None,
-            None,
-            BlockInfo::default(),
-        );
         let mut vm = vm!();
 
         add_segments!(vm, 4);
@@ -969,8 +985,7 @@ mod tests {
             ]
         );
 
-        let mut hint_processor =
-            SyscallHintProcessor::new_empty().expect("Could not create the syscall hint processor");
+        let mut hint_processor = SyscallHintProcessor::new_empty();
 
         let hint_data =
             HintProcessorData::new_default(GET_BLOCK_NUMBER.to_string(), ids_data!["syscall_ptr"]);
@@ -1000,7 +1015,7 @@ mod tests {
 
         let hint_data = HintProcessorData::new_default(GET_CONTRACT_ADDRESS.to_string(), ids_data);
         // invoke syscall
-        let mut hint_processor = SyscallHintProcessor::new_empty().unwrap();
+        let mut hint_processor = SyscallHintProcessor::new_empty();
         hint_processor
             .execute_hint(
                 &mut vm,
@@ -1036,7 +1051,7 @@ mod tests {
 
         let hint_data = HintProcessorData::new_default(GET_TX_SIGNATURE.to_string(), ids_data);
         // invoke syscall
-        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty().unwrap();
+        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty();
 
         let tx_execution_context = TransactionExecutionContext {
             n_emitted_events: 50,
@@ -1047,7 +1062,7 @@ mod tests {
             signature: vec![300.into(), 301.into()],
             nonce: 263.into(),
             n_sent_messages: 52,
-            n_steps: 10000,
+            _n_steps: 10000,
         };
         syscall_handler_hint_processor
             .syscall_handler
@@ -1091,14 +1106,15 @@ mod tests {
         );
 
         // StorageReadRequest.address
-        vm.insert_value(&relocatable!(2, 1), address.clone());
+        vm.insert_value(&relocatable!(2, 1), address.clone())
+            .unwrap();
 
         // syscall_ptr
         let ids_data = ids_data!["syscall_ptr"];
 
         let hint_data = HintProcessorData::new_default(STORAGE_READ.to_string(), ids_data);
 
-        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty().unwrap();
+        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty();
 
         let storage_value = Felt::new(3);
         syscall_handler_hint_processor
@@ -1150,14 +1166,15 @@ mod tests {
         );
 
         // StorageWriteRequest.address
-        vm.insert_value(&relocatable!(2, 1), address.clone());
+        vm.insert_value(&relocatable!(2, 1), address.clone())
+            .unwrap();
 
         // syscall_ptr
         let ids_data = ids_data!["syscall_ptr"];
 
         let hint_data = HintProcessorData::new_default(STORAGE_WRITE.to_string(), ids_data);
 
-        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty().unwrap();
+        let mut syscall_handler_hint_processor = SyscallHintProcessor::new_empty();
 
         syscall_handler_hint_processor
             .syscall_handler

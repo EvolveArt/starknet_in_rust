@@ -1,32 +1,31 @@
-use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-    iter::zip,
-};
-
 use crate::{
     business_logic::{
         execution::{
             execution_errors::ExecutionError, gas_usage::calculate_tx_gas_usage, objects::CallInfo,
             os_usage::get_additional_os_resources,
         },
-        fact_state::state::{
-            calculate_additional_resources, filter_unused_builtins, ExecutionResourcesManager,
-        },
+        fact_state::state::ExecutionResourcesManager,
         state::{
+            cached_state::UNINITIALIZED_CLASS_HASH,
             state_api::{State, StateReader},
             state_cache::StorageEntry,
             update_tracker_state::UpdatesTrackerState,
         },
     },
-    core::errors::{state_errors::StateError, syscall_handler_errors::SyscallHandlerError},
+    core::errors::syscall_handler_errors::SyscallHandlerError,
     definitions::transaction_type::TransactionType,
     services::api::contract_class::EntryPointType,
     utils_errors::UtilsError,
 };
 use cairo_rs::{types::relocatable::Relocatable, vm::vm_core::VirtualMachine};
-use felt::{felt_str, Felt};
+use felt::Felt;
 use num_traits::ToPrimitive;
+use sha3::{Digest, Keccak256};
+use starknet_crypto::FieldElement;
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+};
 
 //* -------------------
 //*      Address
@@ -50,6 +49,7 @@ impl Address {
             .map_err(|_| UtilsError::FeltToFixBytesArrayFail(self.0.clone()))
     }
 }
+
 //* -------------------
 //*  Helper Functions
 //* -------------------
@@ -105,6 +105,15 @@ pub fn field_element_to_felt(felt: &FieldElement) -> Felt {
     Felt::from_bytes_be(&felt.to_bytes_be())
 }
 
+pub fn felt_to_hash(value: &Felt) -> [u8; 32] {
+    let mut output = [0; 32];
+
+    let bytes = value.to_bytes_be();
+    output[32 - bytes.len()..].copy_from_slice(&bytes);
+
+    output
+}
+
 // -------------------
 //    STATE UTILS
 // -------------------
@@ -114,24 +123,14 @@ pub fn field_element_to_felt(felt: &FieldElement) -> Felt {
 
 pub fn to_state_diff_storage_mapping(
     storage_writes: HashMap<StorageEntry, Felt>,
-) -> Result<HashMap<Felt, HashMap<[u8; 32], Address>>, StateError> {
+) -> HashMap<Felt, HashMap<[u8; 32], Address>> {
     let mut storage_updates: HashMap<Felt, HashMap<[u8; 32], Address>> = HashMap::new();
     for ((address, key), value) in storage_writes {
-        if storage_updates.contains_key(&address.0) {
-            let mut map = storage_updates
-                .get(&address.0)
-                .ok_or(StateError::EmptyKeyInStorage)?
-                .to_owned();
-            map.insert(key, Address(value));
-            storage_updates.insert(address.0, map);
-        } else {
-            let mut new_map: HashMap<[u8; 32], Address> = HashMap::new();
-            new_map.insert(key, Address(value));
-            storage_updates.insert(address.0, new_map);
-        }
+        let mut map = storage_updates.get(&address.0).cloned().unwrap_or_default();
+        map.insert(key, Address(value));
+        storage_updates.insert(address.0, map);
     }
-
-    Ok(storage_updates)
+    storage_updates
 }
 
 /// Returns the total resources needed to include the most recent transaction in a StarkNet batch
@@ -162,7 +161,8 @@ pub fn calculate_tx_resources<S: State + StateReader>(
     let n_deployments = non_optional_calls
         .clone()
         .into_iter()
-        .fold(0, |acc, c| get_call_n_deployments(c));
+        .map(get_call_n_deployments)
+        .sum();
 
     let mut l2_to_l1_messages = Vec::new();
 
@@ -182,9 +182,9 @@ pub fn calculate_tx_resources<S: State + StateReader>(
     let tx_syscall_counter = resources_manager.syscall_counter;
 
     // Add additional Cairo resources needed for the OS to run the transaction.
-    let additional_resources = get_additional_os_resources(tx_syscall_counter, tx_type);
-    let new_resources = calculate_additional_resources(cairo_usage, additional_resources);
-    let filtered_builtins = filter_unused_builtins(new_resources);
+    let additional_resources = get_additional_os_resources(tx_syscall_counter, &tx_type)?;
+    let new_resources = cairo_usage + additional_resources;
+    let filtered_builtins = new_resources.filter_unused_builtins();
 
     let mut resources: HashMap<String, usize> = HashMap::new();
     resources.insert("l1_gas_usage".to_string(), l1_gas_usage);
@@ -248,15 +248,49 @@ where
     keys1.into_iter().collect()
 }
 
+//* ----------------------------
+//* Execution entry point utils
+//* ----------------------------
+
+pub fn get_deployed_address_class_hash_at_address<S: StateReader>(
+    mut state: S,
+    contract_address: Address,
+) -> Result<[u8; 32], ExecutionError> {
+    let class_hash: [u8; 32] = state
+        .get_class_hash_at(&contract_address)
+        .map_err(|_| ExecutionError::FailToReadClassHash)?
+        .to_owned();
+
+    if class_hash == *UNINITIALIZED_CLASS_HASH {
+        return Err(ExecutionError::NotDeployedContract(class_hash));
+    }
+    Ok(class_hash)
+}
+
+pub fn validate_contract_deployed<S: StateReader + Clone>(
+    state: S,
+    contract_address: Address,
+) -> Result<[u8; 32], ExecutionError> {
+    get_deployed_address_class_hash_at_address(state, contract_address)
+}
+
+pub fn calculate_sn_keccak(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Keccak256::default();
+    hasher.update(data);
+    let mut result: [u8; 32] = hasher.finalize().into();
+    // Only the first 250 bits from the hash are used.
+    result[0] &= 0b0000_0011;
+    result
+}
+
 //* -------------------
 //*      Macros
 //* -------------------
 
-use starknet_crypto::FieldElement;
-
 #[cfg(test)]
 #[macro_use]
 pub mod test_utils {
+    #![allow(unused)]
 
     #[macro_export]
     macro_rules! any_box {
@@ -301,14 +335,13 @@ pub mod test_utils {
     pub(crate) use ids_data;
 
     macro_rules! vm {
-        () => {{
-            use felt::Felt;
+        () => {
             VirtualMachine::new(false)
-        }};
+        };
 
-        ($use_trace:expr) => {{
+        ($use_trace:expr) => {
             VirtualMachine::new($use_trace, Vec::new())
-        }};
+        };
     }
     pub(crate) use vm;
 
@@ -423,7 +456,13 @@ pub mod test_utils {
         }};
         ($vm:expr, $ids_data:expr, $hint_code:expr) => {{
             let hint_data = HintProcessorData::new_default($hint_code.to_string(), $ids_data);
-            let mut hint_processor = SyscallHintProcessor::new_empty().unwrap();
+            let mut hint_processor = $crate::core::syscalls::syscall_handler::SyscallHintProcessor::<
+                $crate::core::syscalls::business_logic_syscall_handler::BusinessLogicSyscallHandler::<
+                    $crate::business_logic::state::cached_state::CachedState<
+                        $crate::business_logic::fact_state::in_memory_state_reader::InMemoryStateReader,
+                    >,
+                >,
+            >::new_empty();
             hint_processor.execute_hint(
                 &mut $vm,
                 exec_scopes_ref!(),
@@ -456,15 +495,11 @@ pub mod test_utils {
 
 #[cfg(test)]
 mod test {
+    use super::{to_cache_state_storage_mapping, to_state_diff_storage_mapping};
+    use crate::utils::{subtract_mappings, Address};
     use felt::Felt;
     use num_traits::Num;
-    use std::{collections::HashMap, hash::Hash};
-
-    use crate::utils::{subtract_mappings, Address};
-
-    use super::{
-        test_utils::storage_key, to_cache_state_storage_mapping, to_state_diff_storage_mapping,
-    };
+    use std::collections::HashMap;
 
     #[test]
     fn to_state_diff_storage_mapping_test() {
@@ -481,7 +516,7 @@ mod test {
         storage.insert((address1.clone(), key1), value1.clone());
         storage.insert((address2.clone(), key2), value2.clone());
 
-        let map = to_state_diff_storage_mapping(storage).unwrap();
+        let map = to_state_diff_storage_mapping(storage);
 
         assert_eq!(
             *map.get(&address1.0).unwrap().get(&key1).unwrap(),
@@ -558,7 +593,7 @@ mod test {
         storage.insert((address1.clone(), key1), value1.clone());
         storage.insert((address2.clone(), key2), value2.clone());
 
-        let state_dff = to_state_diff_storage_mapping(storage).unwrap();
+        let state_dff = to_state_diff_storage_mapping(storage);
         let cache_storage = to_cache_state_storage_mapping(state_dff);
 
         let mut expected_res = HashMap::new();

@@ -1,18 +1,13 @@
+use crate::{core::errors::state_errors::StateError, utils::Address};
+use felt::Felt;
+use getset::Getters;
 use std::collections::{HashMap, HashSet};
 
-use crate::core::errors::state_errors::StateError;
-use crate::services::api::contract_class::ContractClass;
-use felt::Felt;
-
-use super::state_api_objects::BlockInfo;
-
-use super::state_api::StateReader;
-use crate::utils::Address;
 /// (contract_address, key)
 pub(crate) type StorageEntry = (Address, [u8; 32]);
 
-#[derive(Debug, Default, Clone)]
-pub(crate) struct StateCache {
+#[derive(Debug, Default, Clone, Getters)]
+pub struct StateCache {
     // Reader's cached information; initial values, read before any write operation (per cell)
     pub(crate) class_hash_initial_values: HashMap<Address, [u8; 32]>,
     pub(crate) nonce_initial_values: HashMap<Address, Felt>,
@@ -21,10 +16,13 @@ pub(crate) struct StateCache {
     // Writer's cached information.
     pub(crate) class_hash_writes: HashMap<Address, [u8; 32]>,
     pub(crate) nonce_writes: HashMap<Address, Felt>,
+    #[get = "pub"]
     pub(crate) storage_writes: HashMap<StorageEntry, Felt>,
 }
 
 impl StateCache {
+    // TODO: Remove warning inhibitor when finally used.
+    #[allow(dead_code)]
     pub(crate) fn new() -> Self {
         Self {
             class_hash_initial_values: HashMap::new(),
@@ -94,6 +92,8 @@ impl StateCache {
         Ok(())
     }
 
+    // TODO: Remove warning inhibitor when finally used.
+    #[allow(dead_code)]
     pub(crate) fn get_accessed_contract_addresses(&self) -> HashSet<Address> {
         let mut set: HashSet<Address> = HashSet::with_capacity(self.class_hash_writes.len());
         set.extend(self.class_hash_writes.keys().cloned());
@@ -105,8 +105,6 @@ impl StateCache {
 
 #[cfg(test)]
 mod tests {
-    use crate::business_logic::state;
-
     use super::*;
 
     #[test]
